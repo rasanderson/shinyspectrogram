@@ -35,7 +35,20 @@ ui <- page_sidebar(
                          icon = icon("play"),
                          class = "btn-primary")
         ),
-        DTOutput("selection_table_display")
+        DTOutput("selection_table_display"),
+        
+        # Add custom playback controls
+        card(
+            card_header("Custom Playback"),
+            layout_columns(
+                col_widths = c(4, 4, 4),
+                numericInput("custom_start", "Start Time (s)", value = 0, step = 0.1),
+                numericInput("custom_end", "End Time (s)", value = 1, step = 0.1),
+                actionButton("play_custom", "Play Custom Segment",
+                             icon = icon("play"),
+                             class = "btn-secondary")
+            )
+        )
     )
 )
 
@@ -48,13 +61,16 @@ server <- function(input, output, session) {
         end_time = NULL,
         start_sys_time = NULL,
         plot_bounds = NULL,
-        selection_data = NULL
+        selection_data = NULL,
+        duration = NULL
     )
     
     # Read and process the WAV file
     wav_data <- reactive({
         req(input$wav_file)
-        readWave(input$wav_file$datapath)
+        wav <- readWave(input$wav_file$datapath)
+        rv$duration <- length(wav@left) / wav@samp.rate  # Store duration
+        wav
     })
     
     # Calculate spectrogram
@@ -97,6 +113,15 @@ server <- function(input, output, session) {
         rv$selection_data <- data
     })
     
+    # Update custom end time when wav file is loaded
+    observeEvent(rv$duration, {
+        if (!is.null(rv$duration)) {
+            updateNumericInput(session, "custom_end", value = min(1, rv$duration))
+            updateNumericInput(session, "custom_end", max = rv$duration)
+            updateNumericInput(session, "custom_start", max = rv$duration)
+        }
+    })
+    
     # Animation observer
     observe({
         if (rv$is_playing) {
@@ -111,6 +136,38 @@ server <- function(input, output, session) {
             }
         }
     })
+    
+    # Function to play audio segment
+    play_segment <- function(start_time, end_time) {
+        req(wav_data())
+        
+        audio <- wav_data()
+        start_sample <- round(start_time * audio@samp.rate) + 1
+        end_sample <- round(end_time * audio@samp.rate)
+        
+        segment <- audio
+        segment@left <- audio@left[start_sample:end_sample]
+        if(audio@stereo) {
+            segment@right <- audio@right[start_sample:end_sample]
+        }
+        
+        temp_file <- tempfile(fileext = ".wav")
+        writeWave(segment, temp_file)
+        
+        rv$is_playing <- TRUE
+        rv$start_time <- start_time
+        rv$current_time <- start_time
+        rv$end_time <- end_time
+        rv$start_sys_time <- Sys.time()
+        
+        system2("play", temp_file, wait = FALSE)
+        
+        later::later(function() {
+            if(file.exists(temp_file)) {
+                unlink(temp_file)
+            }
+        }, 5)
+    }
     
     # Create the annotated plot
     output$annotated_plot <- renderPlot({
@@ -183,35 +240,20 @@ server <- function(input, output, session) {
         selections <- rv$selection_data
         
         if(length(selected_row) > 0) {
-            start_time <- selections[[1]][selected_row]
-            end_time <- selections[[2]][selected_row]
-            
-            audio <- wav_data()
-            start_sample <- round(start_time * audio@samp.rate) + 1
-            end_sample <- round(end_time * audio@samp.rate)
-            
-            segment <- audio
-            segment@left <- audio@left[start_sample:end_sample]
-            if(audio@stereo) {
-                segment@right <- audio@right[start_sample:end_sample]
-            }
-            
-            temp_file <- tempfile(fileext = ".wav")
-            writeWave(segment, temp_file)
-            
-            rv$is_playing <- TRUE
-            rv$start_time <- start_time
-            rv$current_time <- start_time
-            rv$end_time <- end_time
-            rv$start_sys_time <- Sys.time()
-            
-            system2("play", temp_file, wait = FALSE)
-            
-            later::later(function() {
-                if(file.exists(temp_file)) {
-                    unlink(temp_file)
-                }
-            }, 5)
+            play_segment(selections[[1]][selected_row], selections[[2]][selected_row])
+        }
+    })
+    
+    # Play custom segment when button is clicked
+    observeEvent(input$play_custom, {
+        req(wav_data())
+        
+        # Validate input times
+        start_time <- max(0, input$custom_start)
+        end_time <- min(input$custom_end, rv$duration)
+        
+        if(end_time > start_time) {
+            play_segment(start_time, end_time)
         }
     })
 }
